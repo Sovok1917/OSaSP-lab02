@@ -7,4 +7,4 @@ TERM
 USER
 LC_COLLATE
 PATH
-MY_EXTRA_VAR  # Example of an optional extra variable
+EXTRA_VAR
