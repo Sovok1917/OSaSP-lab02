@@ -55,7 +55,3 @@ Makefile.am
 config.h
 config.log
 config.status
-
-# Ignore documents
-*.pdf
-

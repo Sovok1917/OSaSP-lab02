@@ -1,494 +1,525 @@
-/**
- * @file parent.c
- * @brief Parent process for demonstrating fork, execve, and environment passing.
+/*
+ * parent.c: Parent process for demonstrating process creation and environment handling.
  *
- * This program launches child processes (`child`) based on user commands,
- * illustrating different ways to manage the child's environment variables:
- * 1. Inheriting the parent's environment and using getenv ('+' or '&' mode).
- * 2. Passing a custom, minimal environment via execve's envp ('*' mode).
- * It requires the CHILD_PATH environment variable to be set, pointing to the
- * directory containing the 'child' executable and the 'env' configuration file.
+ * This program sorts and prints its initial environment variables. It then enters
+ * a loop waiting for specific keyboard commands (+, *, &) to launch child processes.
+ * Each launch method uses a different technique to find the child executable's path
+ * and passes a filtered environment to the child based on a configuration file.
+ * The '&' command also causes the parent process to terminate after launching the child.
+ *
+ * Requires the CHILD_PATH environment variable to be set to the directory
+ * containing the child executable before running.
+ * Requires a command-line argument specifying the path to the environment
+ * variable filter file.
  */
-#define _POSIX_C_SOURCE 200809L // For strdup, getline, nanosleep, POSIX compliance
-#define _DEFAULT_SOURCE         // For miscellaneous glibc features if needed implicitly
-// Although nanosleep should be covered by _POSIX_C_SOURCE >= 199309L
+#define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <errno.h>
-#include <ctype.h>
-#include <locale.h>
-#include <time.h>    // For nanosleep
-#include <stdbool.h> // For bool type
+#include <unistd.h>     // fork, execve, getpid, getppid, environ
+#include <sys/types.h>  // pid_t
+#include <sys/wait.h>   // waitpid
+#include <errno.h>      // errno
+#include <locale.h>     // setlocale, strcoll
+#include <limits.h>     // PATH_MAX (potentially)
 
-// External access to the process environment list
+// External variable defined by the environment (IEEE Std 1003.1-2017)
 extern char **environ;
 
-// ---- Constants ----
-#define MAX_VAR_VALUE_LEN 1024 // Max length for formatted NAME=VALUE string (practical limit)
-#define MAX_PATH_LEN 4096      // Max length for paths (practical limit)
-#define CHILD_NAME_PREFIX "child_"
-#define CHILD_NAME_LEN (sizeof(CHILD_NAME_PREFIX) + 2) // "child_XX\0"
-#define ENV_FILENAME "env" // Standard name for the env file
+// Maximum number of child processes (00-99)
+#define MAX_CHILDREN 100
+// Buffer size for constructing paths and arguments
+#define BUFFER_SIZE 1024
+// Name of the child executable file
+#define CHILD_EXECUTABLE_NAME "child"
+// Name of the environment variable used to pass the filter file path
+#define ENV_VAR_FILTER_FILE_NAME "CHILD_ENV_FILTER_FILE"
 
-// ---- Globals ----
-// Counter for naming child processes uniquely. Explicitly initialized per requirement 11.
-static int child_counter = 0;
+// Type definition for environment array list (dynamic)
+typedef struct {
+    char **vars;
+    size_t count;
+    size_t capacity;
+} env_list_t;
 
-// ---- Function Prototypes ----
-int compare_strings(const void *a, const void *b);
-void print_sorted_environ(void);
-char** build_child_env(const char *full_env_file_path);
-void free_child_env(char **envp);
-void launch_child(const char *child_exec_path, const char *full_env_file_path, char mode, bool is_background);
+// Global counter for child process numbers
+static int g_child_number = 0;
 
-/**
- * @brief Main function for the parent process.
+/* --- Function Prototypes --- */
+
+// Comparison function for qsort using LC_COLLATE=C (via strcoll)
+static int compare_env_vars(const void *a, const void *b);
+
+// Finds the value of an environment variable within a given environment array.
+static char *find_env_var_value(const char *var_name, char **env_array);
+
+// Creates a filtered environment array based on names read from a file.
+static env_list_t create_filtered_env(const char *filter_filename, char **source_env);
+
+// Frees the memory allocated for a filtered environment list.
+static void free_env_list(env_list_t *list);
+
+// Launches a child process using the specified method.
+static int launch_child(char method, const char *filter_filename, char **main_envp);
+
+// Prints usage information to stderr.
+static void print_usage(const char *prog_name);
+
+/*
+ * main: Entry point of the parent program.
  *
- * Initializes paths, prints the parent environment, and enters a command loop
- * to launch child processes based on user input.
- * Requires the CHILD_PATH environment variable to be set correctly.
+ * Parses arguments, sorts and prints environment variables, and enters
+ * the command processing loop to launch child processes.
  *
- * @param void Takes no command-line arguments.
- * @return int Returns EXIT_SUCCESS on normal exit, EXIT_FAILURE on critical errors.
+ * @param argc Number of command-line arguments.
+ * @param argv Array of command-line argument strings.
+ * @param envp Array of environment variable strings passed by the OS.
+ * @return EXIT_SUCCESS on successful completion, EXIT_FAILURE on error.
  */
-int main(void) {
-    const char *child_path_dir = NULL;
-    char child_exec_path[MAX_PATH_LEN];
-    char env_file_path[MAX_PATH_LEN];
-    int n_exec, n_env;
-    int ch, next_ch;
-
-    // --- Initialization and Path Setup ---
-
-    // Get CHILD_PATH from environment - this points to the build dir
-    child_path_dir = getenv("CHILD_PATH");
-    if (!child_path_dir) {
-        fprintf(stderr, "Error: CHILD_PATH environment variable not set.\n");
-        fprintf(stderr, "Please run using 'make run' or 'make run-release',\n");
-        fprintf(stderr, "or manually set CHILD_PATH (e.g., export CHILD_PATH=build/debug).\n");
+int main(int argc, char *argv[], char *envp[]) {
+    // 1. Check Command Line Arguments
+    if (argc != 2) {
+        print_usage(argv[0]);
         return EXIT_FAILURE;
     }
+    const char *env_filter_file = argv[1];
 
-    // Construct full path to child executable
-    n_exec = snprintf(child_exec_path, sizeof(child_exec_path), "%s/child", child_path_dir);
-    if (n_exec < 0 || (size_t)n_exec >= sizeof(child_exec_path)) {
-        fprintf(stderr, "Error: CHILD_PATH resulted in too long executable path.\n");
-        return EXIT_FAILURE;
-    }
-
-    // Construct full path to the environment file
-    n_env = snprintf(env_file_path, sizeof(env_file_path), "%s/%s", child_path_dir, ENV_FILENAME);
-    if (n_env < 0 || (size_t)n_env >= sizeof(env_file_path)) {
-        fprintf(stderr, "Error: CHILD_PATH resulted in too long env file path.\n");
-        return EXIT_FAILURE;
-    }
-
-    // Check if the child executable exists and is executable
-    if (access(child_exec_path, X_OK) != 0) {
-        perror("Error checking child executable");
-        fprintf(stderr, "Parent looked for: %s\n", child_exec_path);
-        fprintf(stderr, "Ensure CHILD_PATH is correct and 'make' was run successfully.\n");
-        return EXIT_FAILURE;
-    }
-
-    // Check if the env file exists and is readable
-    if (access(env_file_path, R_OK) != 0) {
-        perror("Error checking env file");
-        fprintf(stderr, "Parent looked for: %s\n", env_file_path);
-        fprintf(stderr, "Ensure CHILD_PATH is correct and the '%s' file exists.\n", ENV_FILENAME);
-        return EXIT_FAILURE;
-    }
-
-    // --- Main Logic ---
-
-    // Print parent's sorted environment once at the start
-    print_sorted_environ();
-
-    // Input loop
-    printf("\nEnter command (+ = launch fg getenv, * = launch fg envp, & = launch bg getenv, q = quit):\n");
-    fflush(stdout); // Ensure prompt is shown before blocking read
-
-    // Use printf in condition for continuous prompting
-    while (printf("> "), fflush(stdout), (ch = getchar()) != EOF) {
-        // Consume trailing newline or extra input on the line
-        if (ch != '\n') {
-            while ((next_ch = getchar()) != '\n' && next_ch != EOF);
-        } else {
-            continue; // If only newline was pressed, just re-prompt
-        }
-
-        switch (ch) {
-            case '+':
-                printf("Command: +\n");
-                // Pass full env file path, run in foreground (getenv mode)
-                launch_child(child_exec_path, env_file_path, '+', false);
-                break;
-            case '*':
-                printf("Command: *\n");
-                // Env file path needed to build envp, run in foreground (envp mode)
-                launch_child(child_exec_path, env_file_path, '*', false);
-                break;
-            case '&':
-                printf("Command: & (Launching child in background using '+' mode)\n");
-                // Launch using '+' mode conventions, but in the background
-                launch_child(child_exec_path, env_file_path, '+', true);
-                break;
-            case 'q':
-                printf("Command: q\nExiting.\n");
-                // Note: Does not explicitly wait for background children.
-                // They become orphans and are adopted by init/systemd.
-                return EXIT_SUCCESS;
-            default:
-                printf("Unknown command: '%c'\n", ch);
-                break;
-        }
-        // Re-prompt is handled by the while loop condition
-    }
-
-    printf("\nEOF reached or error reading input. Exiting.\n");
-    return EXIT_SUCCESS; // Normal exit if EOF is reached
-}
-
-/**
- * @brief String comparison function for qsort.
- *
- * Compares two C-style strings using strcmp. Assumes LC_COLLATE="C" locale
- * for byte-wise comparison.
- *
- * @param a Pointer to the first string pointer.
- * @param b Pointer to the second string pointer.
- * @return int Result of strcmp (negative if a<b, 0 if a==b, positive if a>b).
- */
-int compare_strings(const void *a, const void *b) {
-    return strcmp(*(const char **)a, *(const char **)b);
-}
-
-/**
- * @brief Prints the parent process's environment variables sorted alphabetically.
- *
- * Copies the environment pointers, sorts them using qsort with LC_COLLATE="C",
- * and prints them to standard output. Handles memory allocation errors.
- *
- * @param void
- * @return void
- */
-void print_sorted_environ(void) {
-    int count = 0;
-    char **env_copy = NULL;
-    char **current = environ;
+    // 2. Sort and Print Environment Variables
+    printf("Parent PID: %d\n", getpid());
+    printf("Initial environment variables (sorted LC_COLLATE=C):\n");
 
     // Count environment variables
-    while (*current++) {
-        count++;
+    int env_count = 0;
+    for (char **env = envp; *env != NULL; ++env) {
+        env_count++;
     }
 
-    if (count == 0) {
-        printf("--- Parent's Environment (empty) ---\n");
-        return;
+    // Allocate memory to store pointers for sorting
+    char **sorted_envp = malloc(env_count * sizeof(char *));
+    if (sorted_envp == NULL) {
+        perror("Failed to allocate memory for environment sorting");
+        return EXIT_FAILURE;
     }
 
-    // Allocate memory for a copy of the pointers
-    env_copy = malloc(count * sizeof(char *));
-    if (!env_copy) {
-        perror("malloc for env_copy failed");
-        // Non-fatal in interactive parent, just can't print environment
-        return;
+    // Copy pointers from envp
+    for (int i = 0; i < env_count; ++i) {
+        sorted_envp[i] = envp[i];
     }
 
-    // Copy pointers from environ
-    for (int i = 0; i < count; i++) {
-        env_copy[i] = environ[i];
-    }
-
-    // Set locale specifically for sorting (byte order)
-    // This avoids issues with user's locale affecting sort order here.
+    // Set locale for C collation standard required by the task
     if (setlocale(LC_COLLATE, "C") == NULL) {
-        fprintf(stderr, "Warning: Failed to set locale LC_COLLATE=C for sorting\n");
-        // Continue with default locale sorting if setting fails
+        fprintf(stderr, "Warning: Failed to set LC_COLLATE to C. Sorting might be incorrect.\n");
+        // Continue execution, but sorting might use system default
     }
 
-    // Sort the copied pointers
-    qsort(env_copy, count, sizeof(char *), compare_strings);
+    // Sort the environment variables
+    qsort(sorted_envp, env_count, sizeof(char *), compare_env_vars);
 
-    // Print sorted environment
-    printf("--- Parent's Sorted Environment (LC_COLLATE=C) ---\n");
-    for (int i = 0; i < count; i++) {
-        printf("%s\n", env_copy[i]);
-    }
-    printf("--------------------------------------------------\n");
-
-    // Free the allocated array of pointers (not the strings themselves)
-    free(env_copy);
-
-    // Optional: Restore locale if needed elsewhere, though C locale is often safe.
-    // setlocale(LC_COLLATE, ""); // Restore to environment default
-}
-
-/**
- * @brief Builds a new environment array (envp) for the child process.
- *
- * Reads variable names from the specified environment file (`full_env_file_path`).
- * For each name, retrieves the corresponding value from the *parent's* current
- * environment using getenv(). Creates a new NULL-terminated array of strings,
- * each in the "NAME=VALUE" format, suitable for execve's envp argument.
- * Uses dynamic allocation (malloc/realloc) for the array. Handles file and memory errors.
- * Uses getline() to read arbitrarily long variable names from the file.
- *
- * @param full_env_file_path The absolute path to the environment file listing desired variable names.
- * @return char** A dynamically allocated, NULL-terminated array of "NAME=VALUE" strings,
- *                or NULL if an error occurs (e.g., file not found, memory allocation failed).
- *                The caller is responsible for freeing this array and its contents using free_child_env().
- */
-char** build_child_env(const char *full_env_file_path) {
-    FILE *fp = NULL;
-    char **child_envp = NULL;
-    size_t env_count = 0;
-    size_t env_capacity = 10; // Initial capacity
-
-    char *line = NULL;      // Buffer for getline
-    size_t line_cap = 0;    // Capacity for getline
-    ssize_t line_len;       // Length from getline
-
-    fp = fopen(full_env_file_path, "r");
-    if (!fp) {
-        perror("Parent: fopen env file failed");
-        fprintf(stderr, "Parent: Tried to open: %s\n", full_env_file_path);
-        return NULL;
-    }
-
-    child_envp = malloc(env_capacity * sizeof(char *));
-    if (!child_envp) {
-        perror("Parent: malloc for initial child_envp failed");
-        fclose(fp);
-        return NULL;
-    }
-
-    // Read lines using getline (handles arbitrary length)
-    while ((line_len = getline(&line, &line_cap, fp)) != -1) {
-        // Remove trailing newline if present
-        if (line_len > 0 && (line[line_len - 1] == '\n' || line[line_len - 1] == '\r')) {
-            line[line_len - 1] = '\0';
-            if (line_len > 1 && line[line_len - 2] == '\r') { // Handle CRLF
-                line[line_len - 2] = '\0';
-            }
+    // Print the sorted environment variables
+    for (int i = 0; i < env_count; ++i) {
+        if (printf("%s\n", sorted_envp[i]) < 0) {
+            perror("Failed to print environment variable");
+            free(sorted_envp); // Clean up allocated memory
+            return EXIT_FAILURE;
         }
+    }
+    printf("----------------------------------------\n");
 
-        // Trim leading/trailing whitespace (simple trim)
-        char *start = line;
-        while (isspace((unsigned char)*start)) start++;
+    free(sorted_envp); // Free the temporary array of pointers
 
-        if (*start == '\0') continue; // Skip empty lines after trimming
+    // 3. Command Processing Loop
+    printf("Enter command (+, *, & to launch child, q to quit):\n> ");
+    fflush(stdout); // Ensure prompt is displayed
 
-        char *end = start + strlen(start) - 1;
-        while (end > start && isspace((unsigned char)*end)) end--;
-        *(end + 1) = '\0';
+    int command_char;
+    int terminate_parent = 0; // Flag to signal parent termination after '&' launch
 
-        // Skip empty lines or comments
-        if (*start == '\0' || *start == '#') {
+    while ((command_char = getchar()) != EOF) {
+        // Ignore whitespace like newline that might follow the command char
+        if (command_char == '\n' || command_char == ' ' || command_char == '\t') {
             continue;
         }
 
-        // 'start' now points to the trimmed variable name
-        char *var_name = start;
-        char *var_value = getenv(var_name); // Get value from *parent's* env
+        // Consume rest of the line until newline or EOF
+        int ch;
+        while ((ch = getchar()) != '\n' && ch != EOF);
 
-        if (var_value) {
-            // Resize dynamic array if needed (ensure space for entry + NULL terminator)
-            if (env_count >= env_capacity - 1) {
-                env_capacity *= 2;
-                char **temp = realloc(child_envp, env_capacity * sizeof(char *));
-                if (!temp) {
-                    perror("Parent: realloc for child_envp failed");
-                    // Clean up allocated strings and array before returning
-                    for (size_t i = 0; i < env_count; i++) free(child_envp[i]);
-                    free(child_envp);
-                    fclose(fp);
-                    free(line); // Free getline buffer
-                    return NULL;
+        switch (command_char) {
+            case '+':
+            case '*':
+            case '&':
+                if (launch_child((char)command_char, env_filter_file, envp) != 0) {
+                    fprintf(stderr, "Parent: Failed to launch child process.\n");
                 }
-                child_envp = temp;
-            }
-
-            // Allocate space and format "NAME=VALUE"
-            // Use MAX_VAR_VALUE_LEN as a practical limit for the formatted string
-            size_t entry_len_needed = strlen(var_name) + 1 + strlen(var_value) + 1; // NAME=VALUE\0
-            if (entry_len_needed > MAX_VAR_VALUE_LEN) {
-                fprintf(stderr, "Parent: Warning: Env variable '%s' value too long, skipping.\n", var_name);
-                continue; // Skip this variable
-            }
-
-            child_envp[env_count] = malloc(entry_len_needed);
-            if (!child_envp[env_count]) {
-                perror("Parent: malloc for env entry failed");
-                // Clean up (more complex cleanup ideally needed, simplified here)
-                fclose(fp);
-                free(line);
-                free_child_env(child_envp); // Use helper to free partial array
-                return NULL;
-            }
-            // Use snprintf for safety, though we calculated exact length
-            snprintf(child_envp[env_count], entry_len_needed, "%s=%s", var_name, var_value);
-            env_count++;
-        } else {
-            fprintf(stderr, "Parent: Info: Variable '%s' from %s not found in parent's environment, not passed to child in '*' mode.\n",
-                    var_name, ENV_FILENAME);
+                if (command_char == '&') {
+                    printf("Parent: Initiating termination after launching child via '&'.\n");
+                    terminate_parent = 1; // Set flag to terminate after this iteration
+                }
+                break;
+            case 'q':
+            case 'Q':
+                printf("Parent: Quit command received. Exiting.\n");
+                terminate_parent = 1;
+                break;
+            default:
+                printf("Parent: Unknown command '%c'. Use +, *, &, or q.\n", command_char);
+                break;
         }
-    } // end while getline
 
-    // Check for getline errors
-    if (ferror(fp)) {
-        perror("Parent: Error reading env file");
-        // Clean up
-        fclose(fp);
-        free(line);
-        free_child_env(child_envp);
+        if (terminate_parent) {
+            break; // Exit the while loop
+        }
+
+        printf("> "); // Prompt for next command
+        fflush(stdout);
+    }
+
+    printf("Parent: Exiting cleanly.\n");
+    return EXIT_SUCCESS;
+}
+
+/*
+ * print_usage: Prints usage instructions to stderr.
+ *
+ * @param prog_name The name of the executable (argv[0]).
+ */
+static void print_usage(const char *prog_name) {
+    fprintf(stderr, "Usage: %s <environment_filter_file>\n", prog_name);
+    fprintf(stderr, "  <environment_filter_file>: Path to a file listing environment variables\n");
+    fprintf(stderr, "                             (one per line) to pass to child processes.\n");
+    fprintf(stderr, "  Requires CHILD_PATH environment variable to be set to the directory\n");
+    fprintf(stderr, "  containing the 'child' executable.\n");
+}
+
+
+/*
+ * compare_env_vars: Comparison function for qsort.
+ *
+ * Compares two C strings using strcoll, respecting the current LC_COLLATE locale.
+ * Used for sorting environment variables according to LC_COLLATE=C setting.
+ *
+ * @param a Pointer to the first string pointer.
+ * @param b Pointer to the second string pointer.
+ * @return An integer less than, equal to, or greater than zero if the first
+ *         string is found, respectively, to be less than, to match, or be
+ *         greater than the second.
+ */
+static int compare_env_vars(const void *a, const void *b) {
+    // Cast void pointers back to the correct type (pointer to char pointer)
+    const char **str_a = (const char **)a;
+    const char **str_b = (const char **)b;
+
+    // Use strcoll for locale-aware string comparison
+    return strcoll(*str_a, *str_b);
+}
+
+/*
+ * find_env_var_value: Searches an environment array for a specific variable.
+ *
+ * Iterates through the provided environment array (NULL-terminated list of
+ * "NAME=VALUE" strings) and returns a pointer to the VALUE part if the
+ * variable NAME is found.
+ *
+ * @param var_name The name of the environment variable to find (e.g., "PATH").
+ * @param env_array The environment array (like envp or environ) to search.
+ * @return Pointer to the value string if found, NULL otherwise. The returned
+ *         pointer points into the existing env_array strings, do not free it.
+ */
+static char *find_env_var_value(const char *var_name, char **env_array) {
+    if (var_name == NULL || env_array == NULL) {
+        return NULL;
+    }
+    size_t name_len = strlen(var_name);
+    if (name_len == 0) {
         return NULL;
     }
 
-    free(line); // Free buffer allocated by getline
-    fclose(fp);
-
-    // NULL-terminate the array
-    // Ensure space for NULL terminator (realloc if exactly full)
-    if (env_count >= env_capacity) {
-        char **temp = realloc(child_envp, (env_count + 1) * sizeof(char *));
-        if(!temp) {
-            perror("Parent: realloc for NULL terminator failed");
-            free_child_env(child_envp); // Free existing parts
-            return NULL;
+    for (char **env = env_array; *env != NULL; ++env) {
+        // Check if the current env string starts with "var_name="
+        if (strncmp(*env, var_name, name_len) == 0 && (*env)[name_len] == '=') {
+            return (*env) + name_len + 1; // Return pointer to the character after '='
         }
-        child_envp = temp;
     }
-    child_envp[env_count] = NULL;
-
-    return child_envp;
+    return NULL; // Variable not found
 }
 
-/**
- * @brief Frees the memory allocated for a child environment array.
+/*
+ * create_filtered_env: Reads variable names from a file and creates a new env array.
  *
- * Iterates through the NULL-terminated array `envp`, freeing each individual
- * string, and finally frees the array itself. Safely handles NULL input.
+ * Opens the filter file, reads variable names line by line. For each name,
+ * it retrieves the corresponding value from the source environment and adds
+ * "NAME=VALUE" to a new, dynamically allocated environment array. It also
+ * automatically adds an entry for ENV_VAR_FILTER_FILE_NAME pointing to the
+ * filter file path itself, so the child can find it.
  *
- * @param envp The environment array (char**) to free, previously allocated by build_child_env().
- *             Can be NULL, in which case the function does nothing.
- * @return void
+ * @param filter_filename Path to the file containing variable names (one per line).
+ * @param source_env The environment array (e.g., parent's 'environ') to get values from.
+ * @return An env_list_t containing the new environment array (NULL-terminated).
+ *         The caller is responsible for freeing the list using free_env_list.
+ *         Returns a list with vars=NULL on error.
  */
-void free_child_env(char **envp) {
-    if (!envp) {
-        return; // Safe to call with NULL
+static env_list_t create_filtered_env(const char *filter_filename, char **source_env) {
+    env_list_t list = { .vars = NULL, .count = 0, .capacity = 10 }; // Initial capacity
+    FILE *file = fopen(filter_filename, "r");
+    if (file == NULL) {
+        perror("Failed to open environment filter file");
+        return list; // Return empty list
     }
-    for (int i = 0; envp[i] != NULL; i++) {
-        free(envp[i]); // Free each string "NAME=VALUE"
+
+    list.vars = malloc(list.capacity * sizeof(char *));
+    if (list.vars == NULL) {
+        perror("Failed to allocate initial memory for filtered environment");
+        fclose(file);
+        return list; // Return empty list
     }
-    free(envp); // Free the array of pointers
+
+    char *line_buf = NULL;
+    size_t line_buf_size = 0;
+    ssize_t line_len;
+
+    // Read variable names from the filter file
+    while ((line_len = getline(&line_buf, &line_buf_size, file)) != -1) {
+        // Remove trailing newline character, if present
+        if (line_len > 0 && line_buf[line_len - 1] == '\n') {
+            line_buf[line_len - 1] = '\0';
+            line_len--; // Adjust length
+        }
+
+        // Skip empty lines or lines starting with # (optional comment handling)
+        if (line_len == 0 || line_buf[0] == '#') {
+            continue;
+        }
+
+        char *var_name = line_buf;
+        char *var_value = find_env_var_value(var_name, source_env); // Use parent's original env
+
+        if (var_value != NULL) {
+            // Construct "NAME=VALUE" string
+            size_t entry_len = strlen(var_name) + 1 + strlen(var_value) + 1; // name + '=' + value + '\0'
+            char *env_entry = malloc(entry_len);
+            if (env_entry == NULL) {
+                perror("Failed to allocate memory for environment entry");
+                // Clean up previously allocated entries before returning error
+                free(line_buf);
+                fclose(file);
+                free_env_list(&list); // Free partially built list
+                list.vars = NULL;     // Signal error
+                return list;
+            }
+            snprintf(env_entry, entry_len, "%s=%s", var_name, var_value);
+
+            // Add to list, resize if necessary
+            if (list.count >= list.capacity - 1) { // -1 for the eventual NULL terminator
+                list.capacity *= 2;
+                char **new_vars = realloc(list.vars, list.capacity * sizeof(char *));
+                if (new_vars == NULL) {
+                    perror("Failed to reallocate memory for filtered environment");
+                    free(env_entry); // Free the entry we couldn't add
+                    free(line_buf);
+                    fclose(file);
+                    free_env_list(&list); // Free partially built list
+                    list.vars = NULL;     // Signal error
+                    return list;
+                }
+                list.vars = new_vars;
+            }
+            list.vars[list.count++] = env_entry; // Add the new entry
+        } else {
+            // Optional: Warn if a requested variable is not found in the source env
+            // fprintf(stderr, "Parent: Warning - Variable '%s' from filter file not found in source environment.\n", var_name);
+        }
+    } // End while getline
+
+    free(line_buf); // Free buffer used by getline
+    fclose(file);
+
+    // === Add the filter file path itself to the child's environment ===
+    const char *filter_var_name = ENV_VAR_FILTER_FILE_NAME;
+    const char *filter_var_value = filter_filename; // Value is the path passed to parent
+
+    size_t filter_entry_len = strlen(filter_var_name) + 1 + strlen(filter_var_value) + 1;
+    char *filter_env_entry = malloc(filter_entry_len);
+    if (filter_env_entry == NULL) {
+        perror("Failed to allocate memory for filter file path env entry");
+        free_env_list(&list); // Free partially built list
+        list.vars = NULL;     // Signal error
+        return list;
+    }
+    snprintf(filter_env_entry, filter_entry_len, "%s=%s", filter_var_name, filter_var_value);
+
+    // Ensure space for this entry + NULL terminator
+    if (list.count >= list.capacity - 1) {
+        list.capacity += 2; // Add space for this and NULL
+        char **new_vars = realloc(list.vars, list.capacity * sizeof(char *));
+        if (new_vars == NULL) {
+            perror("Failed to reallocate memory for filter file path env entry");
+            free(filter_env_entry);
+            free_env_list(&list);
+            list.vars = NULL;
+            return list;
+        }
+        list.vars = new_vars;
+    }
+    list.vars[list.count++] = filter_env_entry;
+
+
+    // Add NULL terminator to the end of the environment array
+    list.vars[list.count] = NULL;
+
+    return list; // Return the completed list
 }
 
-/**
- * @brief Launches a child process using fork and execve.
+
+/*
+ * free_env_list: Frees memory allocated for an environment list.
  *
- * Prepares arguments and environment for the child based on the mode.
- * Mode '+': Child inherits parent env, gets env file path in argv[1]. Uses getenv().
- * Mode '*': Child gets a custom minimal env via envp. Gets no extra argv. Uses envp iteration.
- * Handles fork, execve errors. Manages foreground/background execution.
- * Uses nanosleep for a brief pause after launching foreground children to improve output ordering.
+ * Frees each string within the list's 'vars' array and then frees the
+ * 'vars' array itself. Resets count and capacity.
  *
- * @param child_exec_path Path to the child executable.
- * @param full_env_file_path Path to the env file (used by both modes indirectly or directly).
- * @param mode Character indicating the mode ('+' or '*').
- * @param is_background Boolean indicating whether to run the child in the background (true) or foreground (false).
- * @return void
+ * @param list Pointer to the env_list_t to free.
  */
-void launch_child(const char *child_exec_path, const char *full_env_file_path, char mode, bool is_background) {
-    if (child_counter > 99) {
-        fprintf(stderr, "Parent: Maximum child processes (99) reached.\n");
+static void free_env_list(env_list_t *list) {
+    if (list == NULL || list->vars == NULL) {
         return;
     }
-
-    // 1. Build child's environment ('envp') ONLY for '*' mode.
-    //    For '+' mode, the child uses parent's 'environ'.
-    char **child_envp = NULL;
-    if (mode == '*') {
-        child_envp = build_child_env(full_env_file_path);
-        if (!child_envp) {
-            fprintf(stderr, "Parent: Failed to build custom child environment for '*' mode from %s.\n", full_env_file_path);
-            return; // Don't proceed if env build failed
-        }
+    // Free each individual "NAME=VALUE" string
+    for (size_t i = 0; i < list->count; ++i) {
+        free(list->vars[i]);
+        list->vars[i] = NULL; // Avoid double free
     }
-    // If mode == '+', child_envp remains NULL, and execve will use parent's 'environ'.
+    // Free the array of pointers
+    free(list->vars);
+    list->vars = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
 
-    // 2. Prepare child's arguments ('argv')
-    char child_name[CHILD_NAME_LEN];
-    snprintf(child_name, sizeof(child_name), "%s%02d", CHILD_NAME_PREFIX, child_counter);
 
-    char *child_argv[3]; // Max 3: child_name, env_file_path (for '+'), NULL
-    child_argv[0] = child_name;
-    if (mode == '+') { // Also used for '&' background mode
-        child_argv[1] = (char *)full_env_file_path; // Pass env file path as argument
-        child_argv[2] = NULL;
-    } else { // mode == '*'
-        child_argv[1] = NULL; // No extra arguments needed
-        child_argv[2] = NULL; // Keep terminated
+/*
+ * launch_child: Forks and execs a child process.
+ *
+ * Determines the child executable path based on the method ('+', '*', '&').
+ * Creates a filtered environment. Forks the process. The child process
+ * executes the child program using execve. The parent process optionally
+ * waits for the child (or continues asynchronously).
+ *
+ * @param method Character indicating how to find CHILD_PATH ('+', '*', '&').
+ * @param filter_filename Path to the environment filter file.
+ * @param main_envp The environment array passed to parent's main().
+ * @return 0 on success, -1 on failure.
+ */
+static int launch_child(char method, const char *filter_filename, char **main_envp) {
+    if (g_child_number >= MAX_CHILDREN) {
+        fprintf(stderr, "Parent: Maximum number of children (%d) reached.\n", MAX_CHILDREN);
+        return -1;
     }
 
-    // 3. Fork
+    // 1. Determine Child Executable Directory (CHILD_PATH)
+    char *child_dir = NULL;
+    const char *child_path_var_name = "CHILD_PATH";
+
+    switch (method) {
+        case '+':
+            // Use getenv() which searches the current process environment
+            child_dir = getenv(child_path_var_name);
+            if (child_dir == NULL) {
+                fprintf(stderr, "Parent: Error - CHILD_PATH environment variable not found using getenv() for method '+'.\n");
+                return -1;
+            }
+            break;
+        case '*':
+            // Scan the envp array passed to main()
+            child_dir = find_env_var_value(child_path_var_name, main_envp);
+            if (child_dir == NULL) {
+                fprintf(stderr, "Parent: Error - CHILD_PATH environment variable not found in main's envp array for method '*'.\n");
+                return -1;
+            }
+            break;
+        case '&':
+            // Scan the external 'environ' variable
+            child_dir = find_env_var_value(child_path_var_name, environ);
+            if (child_dir == NULL) {
+                fprintf(stderr, "Parent: Error - CHILD_PATH environment variable not found in external 'environ' array for method '&'.\n");
+                return -1;
+            }
+            break;
+        default: // Should not happen based on caller logic
+            fprintf(stderr, "Parent: Internal error - Invalid launch method '%c'.\n", method);
+            return -1;
+    }
+
+    if (strlen(child_dir) == 0) {
+        fprintf(stderr, "Parent: Error - CHILD_PATH environment variable is empty for method '%c'.\n", method);
+        return -1;
+    }
+
+    // 2. Construct Full Path to Child Executable
+    char child_exec_path[BUFFER_SIZE];
+    int path_len = snprintf(child_exec_path, sizeof(child_exec_path), "%s/%s", child_dir, CHILD_EXECUTABLE_NAME);
+    if (path_len < 0 || (size_t)path_len >= sizeof(child_exec_path)) {
+        fprintf(stderr, "Parent: Error constructing child executable path (path too long or snprintf error).\n");
+        return -1;
+    }
+
+    // 3. Construct Child's argv[0]
+    char child_argv0[32]; // "child_XX" + null terminator
+    snprintf(child_argv0, sizeof(child_argv0), "%s_%.2d", CHILD_EXECUTABLE_NAME, g_child_number);
+
+    // Increment child number for the next launch AFTER constructing name
+    g_child_number++;
+
+    // 4. Create Filtered Environment for Child
+    // Use 'environ' as the source, as it reflects the most current state accessible via getenv,
+    // which aligns with how the child will likely access its *own* environment later.
+    env_list_t filtered_env_list = create_filtered_env(filter_filename, environ);
+    if (filtered_env_list.vars == NULL) {
+        fprintf(stderr, "Parent: Failed to create filtered environment for child.\n");
+        return -1; // create_filtered_env already printed perror
+    }
+
+    printf("Parent: Launching child '%s' using method '%c'...\n", child_argv0, method);
+    printf("Parent: Child executable path: %s\n", child_exec_path);
+
+    // 5. Fork Process
     pid_t pid = fork();
 
-    if (pid == -1) { // Fork failed
-        perror("Parent: fork failed");
-        if (mode == '*') {
-            free_child_env(child_envp); // Clean up envp if fork fails
-        }
+    if (pid < 0) {
+        // Fork failed
+        perror("Parent: fork() failed");
+        free_env_list(&filtered_env_list); // Clean up allocated environment
+        return -1;
     } else if (pid == 0) {
         // --- Child Process ---
-        // Execute the child program.
-        // If mode == '*', pass the custom built child_envp.
-        // If mode == '+', pass NULL for envp, making execve use the parent's 'environ'.
-        execve(child_exec_path, child_argv, (mode == '*') ? child_envp : environ);
+        char *child_argv[] = {child_argv0, NULL}; // argv for the child program
 
-        // execve only returns on error
-        perror("Parent: execve failed in child");
-        fprintf(stderr," Parent failed trying to execute: %s with mode '%c'\n", child_exec_path, mode);
-        if (mode == '*') {
-            free_child_env(child_envp); // Free envp in child *only* if exec fails
-        }
-        _exit(EXIT_FAILURE); // Use _exit in child after fork! Avoids flushing parent's stdio.
+        // Execute the child program
+        execve(child_exec_path, child_argv, filtered_env_list.vars);
+
+        // If execve returns, an error occurred
+        perror("Child: execve failed");
+        fprintf(stderr, "Child: Failed to execute '%s'\n", child_exec_path);
+        // IMPORTANT: Use _exit in the child after fork failure to avoid messing with parent's state
+        // (e.g., flushing stdio buffers, calling atexit handlers registered by parent)
+        free_env_list(&filtered_env_list); // Still attempt cleanup before _exit
+        _exit(EXIT_FAILURE);
 
     } else {
         // --- Parent Process ---
-        printf("Parent: Launched child '%s' (PID: %d)%s.\n",
-               child_name, pid, is_background ? " in background" : "");
-        child_counter++; // Increment counter only in parent after successful fork
+        printf("Parent: Forked child process with PID %d.\n", pid);
 
-        // Free the custom child environment if it was created (only for '*' mode)
-        if (mode == '*') {
-            free_child_env(child_envp);
-        }
+        // Clean up the filtered environment allocated in the parent
+        // The child process received copies of these strings via execve.
+        free_env_list(&filtered_env_list);
 
-        // Conditional Wait/Pause for foreground process
-        if (!is_background) {
-            // Give foreground child a moment using nanosleep (POSIX standard)
-            struct timespec sleep_time = {0, 100000000L}; // 0 seconds, 100 million nanoseconds = 100ms
-            struct timespec remaining_time;
-            // Loop in case nanosleep is interrupted by a signal
-            while (nanosleep(&sleep_time, &remaining_time) == -1) {
-                if (errno == EINTR) {
-                    // Interrupted by signal, sleep for the remaining time
-                    sleep_time = remaining_time;
-                } else {
-                    perror("Parent: nanosleep failed");
-                    break; // Exit loop on other errors
-                }
-            }
-            // Note: A more robust solution uses waitpid() or signals,
-            // but nanosleep provides basic output synchronization for this example.
-        }
-        // For background (&), we don't wait or pause. Parent continues immediately.
-        // No SIGCHLD handling implemented; background zombies may occur.
+        // Parent does not wait for the child, as per requirements (implied by no mention of wait)
+        // If using '&', the parent will terminate shortly after this.
+        // For '+' and '*', the parent continues its command loop.
+
+        // Optional: Reap zombie processes occasionally to prevent buildup if parent runs long
+        // int status;
+        // waitpid(-1, &status, WNOHANG); // Check for any terminated children without blocking
     }
+
+    return 0; // Success
 }
