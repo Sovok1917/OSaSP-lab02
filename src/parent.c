@@ -34,6 +34,7 @@
 #include <errno.h>      // errno
 #include <locale.h>     // setlocale, strcoll
 #include <limits.h>     // PATH_MAX (potentially useful, though not strictly needed here)
+#include <stdbool.h>
 
 // External variable holding the process environment (standard).
 extern char **environ;
