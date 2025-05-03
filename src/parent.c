@@ -28,31 +28,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>     // fork, execve, getpid, environ
-#include <sys/types.h>  // pid_t
-#include <sys/wait.h>   // waitpid
-#include <errno.h>      // errno
-#include <locale.h>     // setlocale, strcoll
-#include <limits.h>     // PATH_MAX (potentially useful, though not strictly needed here)
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <locale.h>
+#include <limits.h>
 #include <stdbool.h>
 
-// External variable holding the process environment (standard).
+
 extern char **environ;
 
-// Configuration constants
-#define MAX_CHILDREN 100        // Limit on child process suffixes (00-99)
-#define BUFFER_SIZE 1024        // General buffer size for paths/strings
-#define CHILD_EXECUTABLE_NAME "child" // Expected name of the child executable file
-#define ENV_VAR_FILTER_FILE_NAME "CHILD_ENV_FILTER_FILE" // Env var for filter file path
 
-// Type definition for a dynamically managed list of environment strings.
+#define MAX_CHILDREN 100
+#define BUFFER_SIZE 1024
+#define CHILD_EXECUTABLE_NAME "child"
+#define ENV_VAR_FILTER_FILE_NAME "CHILD_ENV_FILTER_FILE"
+
+
 typedef struct {
-    char **vars;    // Array of "NAME=VALUE" strings
-    size_t count;   // Number of strings currently in the array
-    size_t capacity;// Allocated capacity of the 'vars' array
+    char **vars;
+    size_t count;
+    size_t capacity;
 } env_list_t;
 
-// Global counter for assigning unique numbers to child processes.
+
 static int g_child_number = 0;
 
 /* --- Function Prototypes --- */
@@ -87,24 +87,24 @@ static void print_usage(const char *prog_name);
  *   allocation failure, failure during setup).
  */
 int main(int argc, char *argv[], char *envp[]) {
-    // Validate command line arguments.
+
     if (argc != 2) {
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
     const char *env_filter_file = argv[1];
 
-    // Print parent identity and initial environment.
+
     printf("Parent PID: %d\n", getpid());
     printf("Initial environment variables (sorted LC_COLLATE=C):\n");
 
-    // Count environment variables in envp.
+
     int env_count = 0;
     for (char **env = envp; *env != NULL; ++env) {
         env_count++;
     }
 
-    // Create a temporary array of pointers to sort envp without modifying it directly.
+
     char **sorted_envp = malloc(env_count * sizeof(char *));
     if (sorted_envp == NULL) {
         perror("Parent: Failed to allocate memory for environment sorting");
@@ -114,16 +114,16 @@ int main(int argc, char *argv[], char *envp[]) {
         sorted_envp[i] = envp[i];
     }
 
-    // Set locale to "C" for sorting, as required.
+
     if (setlocale(LC_COLLATE, "C") == NULL) {
         fprintf(stderr, "Parent: Warning - Failed to set LC_COLLATE to C. Sorting might be incorrect.\n");
-        // Continue, but sorting behavior might differ.
+
     }
 
-    // Sort the pointers based on the strings they point to.
+
     qsort(sorted_envp, env_count, sizeof(char *), compare_env_vars);
 
-    // Print the sorted environment.
+
     for (int i = 0; i < env_count; ++i) {
         if (printf("%s\n", sorted_envp[i]) < 0) {
             perror("Parent: Failed to print environment variable");
@@ -133,53 +133,53 @@ int main(int argc, char *argv[], char *envp[]) {
     }
     printf("----------------------------------------\n");
 
-    free(sorted_envp); // Free the temporary pointer array.
+    free(sorted_envp);
 
-    // Main command processing loop.
+
     printf("Enter command (+, *, & to launch child, q to quit):\n> ");
     fflush(stdout);
 
     int command_char;
-    bool terminate_parent = false; // Flag to exit loop.
+    bool terminate_parent = false;
 
     while ((command_char = getchar()) != EOF) {
-        // Ignore leading/trailing whitespace around the command character.
+
         if (command_char == '\n' || command_char == ' ' || command_char == '\t') {
             continue;
         }
 
-        // Consume the rest of the input line (up to newline or EOF).
+
         int ch;
         while ((ch = getchar()) != '\n' && ch != EOF);
 
         switch (command_char) {
-            case '+': // Launch child using getenv for CHILD_PATH
-            case '*': // Launch child using main's envp for CHILD_PATH
-            case '&': // Launch child using 'environ' for CHILD_PATH and then terminate parent
+            case '+':
+            case '*':
+            case '&':
                 if (launch_child((char)command_char, env_filter_file, envp) != 0) {
                     fprintf(stderr, "Parent: Failed to launch child process for command '%c'.\n", command_char);
-                    // Continue loop unless it was '&'
+
                 }
                 if (command_char == '&') {
                     printf("Parent: Initiating termination after launching child via '&'.\n");
-                    terminate_parent = true; // Signal loop exit.
+                    terminate_parent = true;
                 }
                 break;
-            case 'q': // Quit command
+            case 'q':
             case 'Q':
                 printf("Parent: Quit command received. Exiting.\n");
                 terminate_parent = true;
                 break;
-            default: // Unknown command
+            default:
                 printf("Parent: Unknown command '%c'. Use +, *, &, or q.\n", command_char);
                 break;
         }
 
         if (terminate_parent) {
-            break; // Exit the command loop.
+            break;
         }
 
-        printf("> "); // Prompt for the next command.
+        printf("> ");
         fflush(stdout);
     }
 
@@ -219,11 +219,11 @@ static void print_usage(const char *prog_name) {
  *   (Based on strcoll() semantics).
  */
 static int compare_env_vars(const void *a, const void *b) {
-    // Cast the void pointers to the actual type being sorted (pointers to char pointers).
+
     const char **str_a = (const char **)a;
     const char **str_b = (const char **)b;
 
-    // Dereference the pointers to get the strings and compare using strcoll.
+
     return strcoll(*str_a, *str_b);
 }
 
@@ -249,12 +249,12 @@ static char *find_env_var_value(const char *var_name, char **env_array) {
     }
 
     for (char **env = env_array; *env != NULL; ++env) {
-        // Check if the current entry starts with "var_name=".
+
         if (strncmp(*env, var_name, name_len) == 0 && (*env)[name_len] == '=') {
-            return (*env) + name_len + 1; // Return pointer to the value part.
+            return (*env) + name_len + 1;
         }
     }
-    return NULL; // Not found.
+    return NULL;
 }
 
 /*
@@ -278,63 +278,63 @@ static char *find_env_var_value(const char *var_name, char **env_array) {
  *   list will have `list.vars` set to NULL. An error message is printed to stderr.
  */
 static env_list_t create_filtered_env(const char *filter_filename, char **source_env) {
-    env_list_t list = { .vars = NULL, .count = 0, .capacity = 10 }; // Initial state
+    env_list_t list = { .vars = NULL, .count = 0, .capacity = 10 };
     FILE *file = fopen(filter_filename, "r");
     if (file == NULL) {
         perror("Parent: Failed to open environment filter file");
-        return list; // Return list with vars=NULL
+        return list;
     }
 
-    // Allocate initial memory for the pointer array.
+
     list.vars = malloc(list.capacity * sizeof(char *));
     if (list.vars == NULL) {
         perror("Parent: Failed to allocate initial memory for filtered environment");
         fclose(file);
-        return list; // Return list with vars=NULL
+        return list;
     }
 
     char *line_buf = NULL;
     size_t line_buf_size = 0;
     ssize_t line_len;
 
-    // Read variable names from the filter file.
+
     while ((line_len = getline(&line_buf, &line_buf_size, file)) != -1) {
-        // Clean up newline character.
+
         if (line_len > 0 && line_buf[line_len - 1] == '\n') {
             line_buf[line_len - 1] = '\0';
             line_len--;
         }
 
-        // Skip empty lines and comments.
+
         if (line_len == 0 || line_buf[0] == '#') {
             continue;
         }
 
         char *var_name = line_buf;
-        // Find the value in the *source* environment provided.
+
         char *var_value = find_env_var_value(var_name, source_env);
 
         if (var_value != NULL) {
-            // Allocate memory for the "NAME=VALUE" string.
-            size_t entry_len = strlen(var_name) + 1 + strlen(var_value) + 1; // name + '=' + value + '\0'
+
+            size_t entry_len = strlen(var_name) + 1 + strlen(var_value) + 1;
             char *env_entry = malloc(entry_len);
             if (env_entry == NULL) {
                 perror("Parent: Failed to allocate memory for environment entry");
                 free(line_buf);
                 fclose(file);
-                free_env_list(&list); // Clean up partially built list.
-                list.vars = NULL;     // Signal error.
+                free_env_list(&list);
+                list.vars = NULL;
                 return list;
             }
             snprintf(env_entry, entry_len, "%s=%s", var_name, var_value);
 
-            // Resize pointer array if necessary (ensure space for entry + NULL terminator).
+
             if (list.count >= list.capacity - 1) {
                 size_t new_capacity = list.capacity * 2;
                 char **new_vars = realloc(list.vars, new_capacity * sizeof(char *));
                 if (new_vars == NULL) {
                     perror("Parent: Failed to reallocate memory for filtered environment");
-                    free(env_entry); // Free the entry we couldn't add.
+                    free(env_entry);
                     free(line_buf);
                     fclose(file);
                     free_env_list(&list);
@@ -344,16 +344,16 @@ static env_list_t create_filtered_env(const char *filter_filename, char **source
                 list.vars = new_vars;
                 list.capacity = new_capacity;
             }
-            // Add the newly created entry to the list.
+
             list.vars[list.count++] = env_entry;
         }
-        // Optional: Could add a warning here if var_value is NULL (variable not found).
-    } // End while getline
+
+    }
 
     free(line_buf);
     fclose(file);
 
-    // Add the filter file path variable itself to the child's environment.
+
     const char *filter_var_name = ENV_VAR_FILTER_FILE_NAME;
     const char *filter_var_value = filter_filename;
 
@@ -367,9 +367,9 @@ static env_list_t create_filtered_env(const char *filter_filename, char **source
     }
     snprintf(filter_env_entry, filter_entry_len, "%s=%s", filter_var_name, filter_var_value);
 
-    // Ensure space again for this entry + NULL terminator.
+
     if (list.count >= list.capacity - 1) {
-        size_t new_capacity = list.capacity + 2; // Just add enough space.
+        size_t new_capacity = list.capacity + 2;
         char **new_vars = realloc(list.vars, new_capacity * sizeof(char *));
         if (new_vars == NULL) {
             perror("Parent: Failed to reallocate memory for filter file path env entry");
@@ -381,13 +381,13 @@ static env_list_t create_filtered_env(const char *filter_filename, char **source
         list.vars = new_vars;
         list.capacity = new_capacity;
     }
-    // Add the filter file path entry.
+
     list.vars[list.count++] = filter_env_entry;
 
-    // NULL-terminate the environment array.
+
     list.vars[list.count] = NULL;
 
-    return list; // Return the completed list.
+    return list;
 }
 
 
@@ -405,17 +405,17 @@ static env_list_t create_filtered_env(const char *filter_filename, char **source
  */
 static void free_env_list(env_list_t *list) {
     if (list == NULL || list->vars == NULL) {
-        return; // Nothing to free.
+        return;
     }
-    // Free each allocated string in the array.
+
     for (size_t i = 0; i < list->count; ++i) {
         free(list->vars[i]);
-        list->vars[i] = NULL; // Good practice, though array is freed next.
+        list->vars[i] = NULL;
     }
-    // Free the array of pointers.
+
     free(list->vars);
 
-    // Reset the list structure members.
+
     list->vars = NULL;
     list->count = 0;
     list->capacity = 0;
@@ -458,7 +458,7 @@ static int launch_child(char method, const char *filter_filename, char **main_en
         return -1;
     }
 
-    // Determine the directory containing the child executable (CHILD_PATH).
+
     char *child_dir = NULL;
     const char *child_path_var_name = "CHILD_PATH";
 
@@ -480,7 +480,7 @@ static int launch_child(char method, const char *filter_filename, char **main_en
         return -1;
     }
 
-    // Construct the full path to the child executable.
+
     char child_exec_path[BUFFER_SIZE];
     int path_len = snprintf(child_exec_path, sizeof(child_exec_path), "%s/%s", child_dir, CHILD_EXECUTABLE_NAME);
     if (path_len < 0 || (size_t)path_len >= sizeof(child_exec_path)) {
@@ -488,18 +488,18 @@ static int launch_child(char method, const char *filter_filename, char **main_en
         return -1;
     }
 
-    // Construct the name (argv[0]) for the child process instance.
-    char child_argv0[32]; // e.g., "child_00"
-    snprintf(child_argv0, sizeof(child_argv0), "%s_%.2d", CHILD_EXECUTABLE_NAME, g_child_number);
-    g_child_number++; // Increment for the next child.
 
-    // Create the filtered environment list for the child.
-    // Use 'environ' as the source for values, as it's generally the most up-to-date
-    // and accessible view of the environment (similar to what getenv uses).
+    char child_argv0[32];
+    snprintf(child_argv0, sizeof(child_argv0), "%s_%.2d", CHILD_EXECUTABLE_NAME, g_child_number);
+    g_child_number++;
+
+
+
+
     env_list_t filtered_env_list = create_filtered_env(filter_filename, environ);
     if (filtered_env_list.vars == NULL) {
         fprintf(stderr, "Parent: Failed to create filtered environment for child.\n");
-        // create_filtered_env should have printed specific perror reason.
+
         return -1;
     }
 
@@ -507,48 +507,48 @@ static int launch_child(char method, const char *filter_filename, char **main_en
     printf("Parent: Child executable path: %s\n", child_exec_path);
     fflush(stdout);
 
-    // Fork the process.
+
     pid_t pid = fork();
 
     if (pid < 0) {
-        // Fork failed.
+
         perror("Parent: fork() failed");
-        free_env_list(&filtered_env_list); // Clean up allocated environment.
+        free_env_list(&filtered_env_list);
         return -1;
 
     } else if (pid == 0) {
-        // --- Child Process ---
-        char *child_argv[] = {child_argv0, NULL}; // Prepare argv for the child.
 
-        // Execute the child program. execve replaces the current process image.
+        char *child_argv[] = {child_argv0, NULL};
+
+
         execve(child_exec_path, child_argv, filtered_env_list.vars);
 
-        // If execve returns, an error occurred.
+
         perror("Child (in parent context before exec): execve failed");
         fprintf(stderr, "Child (in parent context before exec): Failed attempt to execute '%s'\n", child_exec_path);
-        // Important: Use _exit() in the child after a fork/exec failure.
-        // This prevents the child from returning to the parent's code path
-        // and avoids duplicating actions like flushing parent's stdio buffers
-        // or running parent's atexit handlers.
-        free_env_list(&filtered_env_list); // Attempt cleanup before exiting.
-        _exit(EXIT_FAILURE); // Use _exit, not exit.
+
+
+
+
+        free_env_list(&filtered_env_list);
+        _exit(EXIT_FAILURE);
 
     } else {
-        // --- Parent Process ---
+
         printf("Parent: Forked child process with PID %d.\n", pid);
         fflush(stdout);
 
-        // Parent cleans up its copy of the filtered environment list.
-        // The child received its own copies of the strings via execve.
+
+
         free_env_list(&filtered_env_list);
 
-        // Parent does not wait for the child, continues its loop (or terminates if method was '&').
-        // No wait() or waitpid() call here.
 
-        // Note: In a long-running parent, it might be necessary to periodically
-        // call waitpid(-1, NULL, WNOHANG) to reap zombie child processes.
-        // For this assignment's structure, it's likely not critical.
+
+
+
+
+
     }
 
-    return 0; // Parent returns success after fork.
+    return 0;
 }

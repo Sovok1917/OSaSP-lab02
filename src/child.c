@@ -14,11 +14,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>     // getpid, getppid
-#include <errno.h>      // errno
+#include <unistd.h>
+#include <errno.h>
 
-// Name of the environment variable that stores the path to the filter file.
-// The parent process sets this in the child's environment.
+
+
 #define ENV_VAR_FILTER_FILE_NAME "CHILD_ENV_FILTER_FILE"
 
 /* --- Function Prototypes --- */
@@ -51,16 +51,16 @@ int main(int argc, char *argv[], char **envp) {
     pid_t pid = getpid();
     pid_t ppid = getppid();
 
-    // Print identity information.
+
     if (printf("Child: Name='%s', PID=%d, PPID=%d\n", program_name, pid, ppid) < 0) {
         perror("Child: Failed to print identity");
         return EXIT_FAILURE;
     }
     fflush(stdout);
 
-    // Get the path to the filter file from the received environment (envp).
-    // It is crucial to use envp here, not getenv(), to inspect the specific
-    // environment provided by the parent via execve.
+
+
+
     const char *filter_filename = find_env_var_value_in_array(ENV_VAR_FILTER_FILE_NAME, envp);
 
     if (filter_filename == NULL) {
@@ -71,11 +71,11 @@ int main(int argc, char *argv[], char **envp) {
 
     if (printf("Child: Using environment filter file: %s\n", filter_filename) < 0) {
         perror("Child: Failed to print filter filename");
-        // Non-fatal, attempt to continue.
+
     }
     fflush(stdout);
 
-    // Open the filter file for reading.
+
     FILE *file = fopen(filter_filename, "r");
     if (file == NULL) {
         fprintf(stderr, "Child (%s, %d): Error - ", program_name, pid);
@@ -89,43 +89,43 @@ int main(int argc, char *argv[], char **envp) {
     size_t line_buf_size = 0;
     ssize_t line_len;
 
-    // Read variable names from the filter file, one per line.
+
     while ((line_len = getline(&line_buf, &line_buf_size, file)) != -1) {
-        // Remove trailing newline, if present.
+
         if (line_len > 0 && line_buf[line_len - 1] == '\n') {
             line_buf[line_len - 1] = '\0';
             line_len--;
         }
 
-        // Ignore empty lines or comment lines.
+
         if (line_len == 0 || line_buf[0] == '#') {
             continue;
         }
 
         char *var_name = line_buf;
-        // Look up the value in the received environment array (envp).
+
         char *var_value = find_env_var_value_in_array(var_name, envp);
 
-        // Print the variable and its value (or indicate if not found).
+
         if (printf("  %s=%s\n", var_name, var_value ? var_value : "(Not found in received env)") < 0) {
             perror("Child: Failed to print environment variable");
-            // Attempt to continue printing others.
+
         }
-        fflush(stdout); // Ensure each line is printed promptly.
+        fflush(stdout);
     }
 
-    // Check if getline stopped due to an error rather than EOF.
+
     if (errno != 0 && !feof(file)) {
         fprintf(stderr, "Child (%s, %d): Error - ", program_name, pid);
         perror("Error reading from filter file");
-        // Error is non-fatal at this point, but worth noting.
+
     }
 
-    free(line_buf); // Free the buffer allocated by getline.
+    free(line_buf);
     if (fclose(file) != 0) {
         fprintf(stderr, "Child (%s, %d): Error - ", program_name, pid);
         perror("Failed to close filter file");
-        // Non-fatal error.
+
     }
 
     printf("Child: (%s, %d) exiting.\n", program_name, pid);
@@ -164,12 +164,12 @@ static char *find_env_var_value_in_array(const char *var_name, char **env_array)
     }
 
     for (char **env = env_array; *env != NULL; ++env) {
-        // Check if the current environment string starts with 'var_name' followed by '='.
+
         if (strncmp(*env, var_name, name_len) == 0 && (*env)[name_len] == '=') {
-            // Return a pointer to the character immediately after the '='.
+
             return (*env) + name_len + 1;
         }
     }
-    // The variable was not found in the array.
+
     return NULL;
 }
