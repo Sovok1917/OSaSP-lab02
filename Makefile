@@ -26,7 +26,7 @@ OUT_DIR = $(DEBUG_DIR)
 ifeq ($(MODE), release)
   CURRENT_MODE = release
   CFLAGS = $(BASE_CFLAGS) -O2 # Optimization level 2
-  # CFLAGS += -Werror # Optionally treat warnings as errors in release
+  CFLAGS += -Werror # Optionally treat warnings as errors in release
   OUT_DIR = $(RELEASE_DIR)
 endif
 
