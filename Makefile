@@ -44,7 +44,7 @@ CHILD_PROG = $(OUT_DIR)/child
 
 # Environment variable filter file path (automatically uses the correct OUT_DIR)
 # This file lists the env vars the child should inherit.
-ENV_FILTER_FILE = $(OUT_DIR)/env_vars.txt
+ENV_FILTER_FILE = $(OUT_DIR)/env
 
 # Name of the environment variable used to pass the filter file path to the child
 ENV_VAR_FILTER_FILE_NAME = CHILD_ENV_FILTER_FILE
