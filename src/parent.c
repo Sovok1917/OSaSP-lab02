@@ -31,7 +31,6 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <errno.h>
 #include <locale.h>
 #include <limits.h> // For PATH_MAX (though not strictly used, good to be aware of)
 #include <stdbool.h>
@@ -57,7 +56,6 @@ static int g_child_number = 0; // Initialized at load time, effectively runtime 
 
 /* --- Function Prototypes --- */
 
-static int compare_env_vars(const void *a, const void *b);
 static char *find_env_var_value(const char *var_name, char **env_array);
 static env_list_t create_filtered_env(const char *filter_filename, char **source_env);
 static void free_env_list(env_list_t *list);
@@ -102,52 +100,6 @@ int main(int argc, char *argv[], char *envp[]) {
         perror("Parent: printf failed");
         // Continue if possible, or decide to exit
     }
-    if (printf("Initial environment variables (sorted LC_COLLATE=C):\n") < 0) {
-        perror("Parent: printf failed");
-    }
-
-
-    int env_count = 0;
-    for (char **env = envp; *env != NULL; ++env) {
-        env_count++;
-    }
-
-
-    char **sorted_envp = malloc((size_t)env_count * sizeof(char *));
-    if (sorted_envp == NULL) {
-        perror("Parent: Failed to allocate memory for environment sorting");
-        // abort() is for non-interactive, here we return EXIT_FAILURE
-        return EXIT_FAILURE;
-    }
-    for (int i = 0; i < env_count; ++i) {
-        sorted_envp[i] = envp[i]; // Shallow copy, strings are from original envp
-    }
-
-
-    // Set locale for sorting. Store original locale if needed for restoration.
-    // char *original_locale = setlocale(LC_COLLATE, NULL); // To query current
-    if (setlocale(LC_COLLATE, "C") == NULL) {
-        fprintf(stderr, "Parent: Warning - Failed to set LC_COLLATE to C. Sorting might be incorrect.\n");
-        // Proceed with default locale sorting if "C" fails.
-    }
-
-
-    qsort(sorted_envp, (size_t)env_count, sizeof(char *), compare_env_vars);
-
-
-    for (int i = 0; i < env_count; ++i) {
-        if (printf("%s\n", sorted_envp[i]) < 0) {
-            perror("Parent: Failed to print environment variable");
-            // Consider breaking or returning, depending on severity
-        }
-    }
-    if (printf("----------------------------------------\n") < 0) {
-        perror("Parent: printf failed");
-    }
-
-    free(sorted_envp); // Free the array of pointers, not the strings themselves.
-    sorted_envp = NULL;
-
 
     if (printf("Enter command (+, *, & to launch child, q to quit):\n> ") < 0) {
         perror("Parent: printf failed");
@@ -219,27 +171,6 @@ static void print_usage(const char *prog_name) {
     fprintf(stderr, "  containing the '%s' executable.\n", CHILD_EXECUTABLE_NAME);
 }
 
-
-/*
- * Purpose:
- *   Comparison function suitable for use with qsort() to sort an array of
- *   C strings (char *). It uses strcoll() to perform the comparison based
- *   on the current LC_COLLATE locale setting (expected to be "C" in this program).
- * Receives:
- *   a: A const void pointer to the first element (which is a char *).
- *   b: A const void pointer to the second element (which is a char *).
- * Returns:
- *   An integer < 0 if the string pointed to by 'a' is less than the string 'b'.
- *   An integer = 0 if the string pointed to by 'a' is equal to the string 'b'.
- *   An integer > 0 if the string pointed to by 'a' is greater than the string 'b'.
- *   (Based on strcoll() semantics).
- */
-static int compare_env_vars(const void *a, const void *b) {
-    // Directly casting to const char ** as qsort passes pointers to elements
-    const char *str_a = *(const char **)a;
-    const char *str_b = *(const char **)b;
-    return strcoll(str_a, str_b);
-}
 
 /*
  * Purpose:
